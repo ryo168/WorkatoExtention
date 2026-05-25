@@ -1,0 +1,21 @@
+/*
+ * content.css
+ * ----------------------------------------------------------------------------
+ * 役割 : ハイライト機能用のスタイル定義
+ *
+ * このファイルは Manifest の content_scripts.css 経由で Workato のページに
+ * 安全に注入される (ページ自身の CSP の影響を受けず、インラインスタイルや
+ * eval を経由しないため社内セキュリティ要件にも適合)。
+ *
+ * .wkt-csv-highlight クラスは popup から content.js へのメッセージにより
+ * 一時的に対象ウィジェットへ付与され、3 秒後に自動的に取り除かれる。
+ * ----------------------------------------------------------------------------
+ */
+
+.wkt-csv-highlight {
+  outline: 3px solid #0d9aa0 !important;
+  outline-offset: 3px !important;
+  border-radius: 6px !important;
+  box-shadow: 0 0 0 6px rgba(13, 154, 160, 0.25) !important;
+  transition: outline 0.15s ease, box-shadow 0.15s ease;
+}

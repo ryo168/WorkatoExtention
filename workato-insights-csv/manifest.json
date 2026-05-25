@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Workato Insights CSV Exporter",
+  "version": "1.5.0",
+  "description": "Workato Insights のテーブルウィジェットのデータを CSV としてダウンロードする社内向け拡張機能",
+  "minimum_chrome_version": "102",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://*.workato.com/*"
+  ],
+  "icons": {
+    "16": "icons/active-16.png",
+    "32": "icons/active-32.png",
+    "48": "icons/active-48.png",
+    "128": "icons/active-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Workato Insights CSV Exporter",
+    "default_icon": {
+      "16": "icons/inactive-16.png",
+      "32": "icons/inactive-32.png",
+      "48": "icons/inactive-48.png",
+      "128": "icons/inactive-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.workato.com/*"],
+      "js": ["injector.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.workato.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}
