@@ -10,7 +10,7 @@ CSV としてダウンロードする社内向け Chrome 拡張機能。
 
 ## インストール
 
-1. [最新版 zip をダウンロード](https://github.com/ryo168/WorkatoExtention/releases/download/v1.6.0/workato-insights-csv-v1.6.0.zip)
+1. [最新版 zip をダウンロード](https://github.com/ryo168/WorkatoExtention/releases/download/v1.6.1/workato-insights-csv-v1.6.1.zip)
 2. 任意のフォルダに解凍
 3. Chrome で `chrome://extensions` を開く
 4. 右上の「デベロッパーモード」を ON
@@ -24,4 +24,4 @@ CSV としてダウンロードする社内向け Chrome 拡張機能。
 
 ## バージョン
 
-最新版: **v1.6.0** ([リリースノート](https://github.com/ryo168/WorkatoExtention/releases/tag/v1.6.0))
+最新版: **v1.6.1** ([リリースノート](https://github.com/ryo168/WorkatoExtention/releases/tag/v1.6.1))
