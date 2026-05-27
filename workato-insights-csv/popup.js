@@ -45,7 +45,6 @@
   const LABEL_STORAGE_KEY = 'labels';
   const FILENAME_MAX_LEN = 80;
   const FLASH_FEEDBACK_MS = 1500;
-  const POPUP_CLOSE_DELAY_MS = 250;
 
   // ==========================================================================
   // タブ / URL ユーティリティ
@@ -344,6 +343,7 @@
       if (labels.length === 0) return Promise.resolve(null);
       return sendToContent(tabId, {
         type: 'getWidgetInfo',
+        queryId: cap.queryId || null,
         columnLabels: labels
       }).then(function (resp) {
         if (!resp || !resp.found || !Array.isArray(resp.visibleLabels)) return null;
@@ -374,6 +374,17 @@
     item.className = 'item';
 
     // ----------------------------------------------------------------------
+    // (0) ウィジェットタイトル (レイアウト API から取得した settings.title)
+    // ----------------------------------------------------------------------
+    if (cap.title) {
+      const titleEl = document.createElement('div');
+      titleEl.className = 'item-title';
+      titleEl.textContent = cap.title;
+      titleEl.title = cap.title;
+      item.appendChild(titleEl);
+    }
+
+    // ----------------------------------------------------------------------
     // (1) ラベル入力行
     // ----------------------------------------------------------------------
     const labelRow = document.createElement('div');
@@ -385,7 +396,9 @@
     input.value = labelText || '';
 
     if (cap.queryId) {
-      input.placeholder = '(ラベル未設定 — 名前を付けると次回も表示されます)';
+      input.placeholder = cap.title
+        ? '(任意ラベル — 未設定なら上のタイトルを使用)'
+        : '(ラベル未設定 — 名前を付けると次回も表示されます)';
       input.addEventListener('change', function () {
         setLabel(cap.queryId, input.value).catch(function () { /* noop */ });
       });
@@ -487,13 +500,12 @@
 
       const resp = await sendToContent(tab.id, {
         type: 'highlightWidget',
+        queryId: cap.queryId || null,
         columnLabels: labels
       });
 
       if (resp && resp.found) {
         flashButton(hlBtn, '✓ 表示中', 1000);
-        // ポップアップを閉じて画面の該当箇所を見やすくする
-        setTimeout(function () { window.close(); }, POPUP_CLOSE_DELAY_MS);
       } else {
         flashButton(hlBtn, '✗ 見つかりません', FLASH_FEEDBACK_MS);
       }
@@ -507,7 +519,7 @@
     dlAllBtn.title = 'API レスポンス上のすべての列を含めて CSV 出力します';
     dlAllBtn.addEventListener('click', function () {
       const enteredLabel = input.value.trim();
-      const base = enteredLabel || cap.queryId || 'workato-insights';
+      const base = enteredLabel || cap.title || cap.queryId || 'workato-insights';
       try {
         downloadCSV(
           safeFilenamePart(base) + '_all_' + dateStamp() + '.csv',
@@ -534,6 +546,7 @@
 
       const resp = await sendToContent(tab.id, {
         type: 'getWidgetInfo',
+        queryId: cap.queryId || null,
         columnLabels: labels
       });
 
@@ -551,7 +564,7 @@
       }
 
       const enteredLabel = input.value.trim();
-      const base = enteredLabel || cap.queryId || 'workato-insights';
+      const base = enteredLabel || cap.title || cap.queryId || 'workato-insights';
       try {
         downloadCSV(
           safeFilenamePart(base) + '_visible_' + dateStamp() + '.csv',

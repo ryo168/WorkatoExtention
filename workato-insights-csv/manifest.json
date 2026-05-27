@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Workato Insights CSV Exporter",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Workato Insights のテーブルウィジェットのデータを CSV としてダウンロードする社内向け拡張機能",
   "minimum_chrome_version": "102",
   "permissions": [

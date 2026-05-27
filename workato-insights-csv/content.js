@@ -56,6 +56,9 @@
   /** ハイライト適用に使う CSS クラス (content.css 側で定義) */
   const HIGHLIGHT_CLASS = 'wkt-csv-highlight';
 
+  /** カスタムスムーススクロールの所要時間 (ms) */
+  const SCROLL_DURATION_MS = 850;
+
   /**
    * ウィジェット推定の最低一致数。
    *   - 通常は 2 (= 2 列以上一致しないと採用しない)
@@ -71,6 +74,33 @@
   /** Workato Insights のテーブル列ヘッダ文字列を含む要素のセレクタ */
   const INSIGHTS_COLUMN_HEADER_SELECTOR = '.data-table-column-title__text';
 
+  /**
+   * ウィジェット内で「列ラベル / 系列名 / 軸タイトル / KPI ラベル」候補が出現
+   * しうる要素のセレクタ群。Workato Insights は表/チャート/KPI で DOM 構造が
+   * 異なるため、テーブル列ヘッダだけ見てるとチャート系のキャプチャを取りこぼす。
+   *  - 表           : .data-table-column-title__text
+   *  - チャート凡例 : .chart-container__legend-item-title
+   *  - チャート軸   : .highcharts-axis-title (SVG <text>)
+   *  - KPI         : .kpi-vis__label
+   */
+  const INSIGHTS_LABEL_SELECTORS = [
+    '.data-table-column-title__text',
+    '.chart-container__legend-item-title',
+    '.highcharts-axis-title',
+    '.kpi-vis__label'
+  ];
+
+  /**
+   * テキストスキャンのフォールバック時に「データ値」を読み飛ばすためのセレクタ。
+   * 表の行セル内文字列はラベルと無関係に列名と偶然一致しがちで、ノイズの元になる。
+   */
+  const INSIGHTS_DATA_CELL_SELECTORS = [
+    'w-data-table-row-cell-value',
+    '.data-table-row-cell__value',
+    '.data-table-row-cell',
+    'lcap-text-widget'
+  ].join(',');
+
   // ==========================================================================
   // キャプチャ保持
   // ==========================================================================
@@ -80,6 +110,20 @@
 
   /** queryId が取得できなかったキャプチャの FIFO バッファ */
   const orphans = [];
+
+  /**
+   * queryId → widgetId のマッピング。
+   * Workato Insights のダッシュボードレイアウト API レスポンスから抽出し、
+   * `lcap-dashboard-widget[data-id=...]` に直接ぶつけるための辞書。
+   */
+  const queryIdToWidgetId = new Map();
+
+  /**
+   * queryId → settings.title のマッピング。
+   * data-id 一致が何らかの理由で失敗した時の予備ルートとして、
+   * `.lcap-dashboard-widget__title` のテキスト一致で widget を引く。
+   */
+  const queryIdToTitle = new Map();
 
   /** ハイライト中の要素 (連打時の解除タイマーをクリアするため) */
   let currentHighlightEl = null;
@@ -110,22 +154,48 @@
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.source !== MESSAGE_SOURCE) return;
-    if (msg.type !== 'capture') return;
-    if (!isValidCapture(msg.payload)) return;
 
-    const payload = msg.payload;
-
-    if (typeof payload.queryId === 'string' && payload.queryId.length > 0) {
-      captures.set(payload.queryId, payload);
-      if (captures.size > MAX_CAPTURES) {
-        const oldestKey = captures.keys().next().value;
-        captures.delete(oldestKey);
+    if (msg.type === 'capture') {
+      if (!isValidCapture(msg.payload)) return;
+      const payload = msg.payload;
+      if (typeof payload.queryId === 'string' && payload.queryId.length > 0) {
+        captures.set(payload.queryId, payload);
+        if (captures.size > MAX_CAPTURES) {
+          const oldestKey = captures.keys().next().value;
+          captures.delete(oldestKey);
+        }
+      } else {
+        orphans.push(payload);
+        if (orphans.length > MAX_CAPTURES) orphans.shift();
       }
-    } else {
-      orphans.push(payload);
-      if (orphans.length > MAX_CAPTURES) orphans.shift();
+      return;
+    }
+
+    if (msg.type === 'layout') {
+      const p = msg.payload;
+      if (!p || !Array.isArray(p.mappings)) return;
+      for (let i = 0; i < p.mappings.length; i++) {
+        const m = p.mappings[i];
+        if (!m || typeof m.queryId !== 'string') continue;
+        if (typeof m.widgetId === 'string') queryIdToWidgetId.set(m.queryId, m.widgetId);
+        if (typeof m.title === 'string' && m.title.length > 0) queryIdToTitle.set(m.queryId, m.title);
+      }
+      try { console.debug('[wkt-csv] content: id-map', queryIdToWidgetId.size, 'title-map', queryIdToTitle.size); } catch (e) {}
+      return;
     }
   });
+
+  /**
+   * injector (MAIN world) に DOM 上の lcap-dashboard-widget から
+   * Angular コンポーネントを覗いて queryId を取り直すよう依頼する。
+   * レイアウト API 経由のマッピングが空 / 不完全な時の保険。
+   * 結果は通常の 'layout' メッセージで返ってくる。
+   */
+  function requestDomMapping() {
+    try {
+      window.postMessage({ source: MESSAGE_SOURCE, type: 'request-dom-mapping' }, '*');
+    } catch (e) { /* noop */ }
+  }
 
   // ==========================================================================
   // ウィジェット推定アルゴリズム
@@ -138,49 +208,6 @@
    */
   function normalizeLabel(s) {
     return String(s == null ? '' : s).trim().toLowerCase();
-  }
-
-  /**
-   * ページ全体のテキストノードを 1 回だけ走査し、
-   * 各列ラベルに完全一致するノードの親要素を収集する。
-   * SCRIPT / STYLE / NOSCRIPT などは無視する。
-   *
-   * @param {Set<string>} normalizedLabelSet 正規化済みラベル集合
-   * @returns {Map<string, Element[]>} 正規化ラベル -> 親要素配列
-   */
-  function collectTextMatches(normalizedLabelSet) {
-    const result = new Map();
-    normalizedLabelSet.forEach(function (l) { result.set(l, []); });
-
-    if (!document.body) return result;
-
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT,
-      {
-        acceptNode: function (node) {
-          const parent = node.parentElement;
-          if (!parent) return NodeFilter.FILTER_REJECT;
-          const tag = parent.tagName;
-          if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') {
-            return NodeFilter.FILTER_REJECT;
-          }
-          const v = node.nodeValue;
-          if (!v || !v.trim()) return NodeFilter.FILTER_REJECT;
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
-
-    let node;
-    while ((node = walker.nextNode())) {
-      const norm = normalizeLabel(node.nodeValue);
-      if (result.has(norm)) {
-        const parent = node.parentElement;
-        if (parent) result.get(norm).push(parent);
-      }
-    }
-    return result;
   }
 
   /**
@@ -215,6 +242,7 @@
     if (widgets.length === 0) return null;
 
     const labelSet = new Set(normalizedLabels);
+    const selector = INSIGHTS_LABEL_SELECTORS.join(',');
 
     let best = null;
     let bestScore = 0;
@@ -222,12 +250,12 @@
 
     for (let i = 0; i < widgets.length; i++) {
       const widget = widgets[i];
-      const headerEls = widget.querySelectorAll(INSIGHTS_COLUMN_HEADER_SELECTOR);
-      if (headerEls.length === 0) continue;
+      const labelEls = widget.querySelectorAll(selector);
+      if (labelEls.length === 0) continue;
 
       const matched = new Set();
-      for (let j = 0; j < headerEls.length; j++) {
-        const text = normalizeLabel(headerEls[j].textContent);
+      for (let j = 0; j < labelEls.length; j++) {
+        const text = normalizeLabel(labelEls[j].textContent);
         if (labelSet.has(text)) matched.add(text);
       }
 
@@ -253,56 +281,70 @@
   }
 
   /**
-   * 汎用 TreeWalker フォールバック。Workato 側で DOM 構造が変わった場合に備える。
-   * テキストノードを走査して列ラベルと一致するノードを集め、それらを最も多く
-   * 内包する最小サブツリーを返す。
+   * フォールバック: Workato 側で DOM 構造が変わった場合に備えた汎用スキャン。
+   *
+   * 構造判定が失敗した時のみ呼ばれる。検索範囲は `lcap-dashboard-widget` 内に
+   * 閉じ込め、データテーブルの行セルやテキストウィジェット本文は除外して
+   * 「列名/系列名と無関係な値が偶然一致してしまうノイズ」を避ける。
    *
    * @param {string[]} normalizedLabels 正規化済みラベル配列
    * @returns {Element|null}
    */
   function findWidgetByTextScan(normalizedLabels) {
-    const matches = collectTextMatches(new Set(normalizedLabels));
+    const widgets = document.querySelectorAll(INSIGHTS_WIDGET_SELECTOR);
+    if (widgets.length === 0) return null;
 
-    // 起点ラベル: 候補が空でない中で最も候補数が少ないものを選ぶ
-    let startLabel = null;
-    let minCount = Infinity;
-    matches.forEach(function (els, label) {
-      if (els.length > 0 && els.length < minCount) {
-        minCount = els.length;
-        startLabel = label;
-      }
-    });
-    if (!startLabel) return null;
+    const labelSet = new Set(normalizedLabels);
 
     let best = null;
     let bestScore = 0;
     let bestSize = Infinity;
 
-    const startElements = matches.get(startLabel);
-    for (let i = 0; i < startElements.length; i++) {
-      let el = startElements[i];
-      while (el && el !== document.body) {
-        let score = 0;
-        matches.forEach(function (els) {
-          for (let j = 0; j < els.length; j++) {
-            if (el.contains(els[j])) { score++; return; }
-          }
-        });
+    for (let i = 0; i < widgets.length; i++) {
+      const widget = widgets[i];
+      const matched = new Set();
 
-        if (score > bestScore) {
-          bestScore = score;
-          best = el;
-          bestSize = el.getElementsByTagName('*').length;
-        } else if (score === bestScore && score > 0) {
-          const sz = el.getElementsByTagName('*').length;
-          if (sz < bestSize) {
-            best = el;
-            bestSize = sz;
+      const walker = document.createTreeWalker(
+        widget,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode: function (node) {
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            const tag = parent.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') {
+              return NodeFilter.FILTER_REJECT;
+            }
+            // 行データやテキストウィジェット本文は列名と無関係なのでスキップ
+            if (parent.closest && parent.closest(INSIGHTS_DATA_CELL_SELECTORS)) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            const v = node.nodeValue;
+            if (!v || !v.trim()) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
           }
         }
+      );
 
-        if (score === normalizedLabels.length) break;
-        el = el.parentElement;
+      let node;
+      while ((node = walker.nextNode())) {
+        const norm = normalizeLabel(node.nodeValue);
+        if (labelSet.has(norm)) matched.add(norm);
+      }
+
+      const score = matched.size;
+      if (score === 0) continue;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = widget;
+        bestSize = widget.getElementsByTagName('*').length;
+      } else if (score === bestScore) {
+        const sz = widget.getElementsByTagName('*').length;
+        if (sz < bestSize) {
+          best = widget;
+          bestSize = sz;
+        }
       }
     }
 
@@ -312,19 +354,62 @@
   }
 
   /**
-   * 列ラベルから DOM 上のウィジェットを推定する。
+   * queryId から DOM 上のウィジェットを直接特定する。
+   * Workato Insights のダッシュボードレイアウト API レスポンスを掴めていれば
+   * queryId → widgetId の対応が確実にあり、`data-id` 属性で一発で取れる。
    *
-   * 戦略:
-   *   1. Workato Insights 専用構造 (`lcap-dashboard-widget` + 列ヘッダ要素) を優先
-   *   2. 失敗した場合は汎用テキストスキャンにフォールバック
-   *
-   * UI 上で API レスポンス全列のうち一部しか表示しないケース (列の非表示設定など)
-   * に対応するため、判定は「全列の何%」ではなく「最低 MIN_MATCH_COUNT 列一致」とする。
-   *
-   * @param {string[]} columnLabels 元のラベル配列 (順序付き)
+   * @param {string} queryId
    * @returns {Element|null}
    */
-  function findBestWidget(columnLabels) {
+  function findWidgetByQueryId(queryId) {
+    if (!queryId || typeof queryId !== 'string') return null;
+
+    // ルート1: data-id 直結
+    const widgetId = queryIdToWidgetId.get(queryId);
+    if (widgetId) {
+      const escaped = widgetId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const el = document.querySelector(INSIGHTS_WIDGET_SELECTOR + '[data-id="' + escaped + '"]');
+      if (el) return el;
+    }
+
+    // ルート2: settings.title → ウィジェット見出しテキスト一致
+    const title = queryIdToTitle.get(queryId);
+    if (title) {
+      const normTarget = String(title).trim();
+      const widgets = document.querySelectorAll(INSIGHTS_WIDGET_SELECTOR);
+      for (let i = 0; i < widgets.length; i++) {
+        const titleEl = widgets[i].querySelector('.lcap-dashboard-widget__title');
+        if (titleEl && titleEl.textContent.trim() === normTarget) return widgets[i];
+      }
+    }
+    return null;
+  }
+
+  /**
+   * ウィジェットを非同期に推定する。
+   *
+   * 戦略 (上から優先):
+   *   1. queryId + レイアウト API のマッピングがあれば data-id で即特定
+   *   2. queryId はあるがマッピング未取得なら injector に DOM スキャンを依頼し、
+   *      Angular コンポーネントから queryId を読んでマッピングを構築 → 再試行
+   *   3. Workato Insights 専用構造で照合 (列ヘッダ / 凡例 / KPI ラベル / 軸タイトル)
+   *   4. ウィジェット内に閉じたテキストスキャン
+   *
+   * @param {string[]} columnLabels 元のラベル配列 (順序付き)
+   * @param {string|null} queryId キャプチャの queryId (任意)
+   * @returns {Promise<Element|null>}
+   */
+  async function findBestWidget(columnLabels, queryId) {
+    const direct1 = findWidgetByQueryId(queryId);
+    if (direct1) return direct1;
+
+    // マッピング不在 → DOM スキャンを injector に頼んで少し待つ
+    if (queryId && typeof queryId === 'string') {
+      requestDomMapping();
+      const direct2 = await waitForMapping(queryId, 800);
+      if (direct2) return direct2;
+    }
+
     if (!Array.isArray(columnLabels) || columnLabels.length === 0) return null;
 
     const normalized = normalizeLabelArray(columnLabels);
@@ -334,6 +419,22 @@
     if (primary) return primary;
 
     return findWidgetByTextScan(normalized);
+  }
+
+  /**
+   * queryId のマッピングが届くのを最大 timeoutMs まで待ち、届いたらその要素を返す。
+   */
+  function waitForMapping(queryId, timeoutMs) {
+    return new Promise(function (resolve) {
+      const start = performance.now();
+      function tick() {
+        const el = findWidgetByQueryId(queryId);
+        if (el) { resolve(el); return; }
+        if (performance.now() - start >= timeoutMs) { resolve(null); return; }
+        setTimeout(tick, 50);
+      }
+      tick();
+    });
   }
 
   // ==========================================================================
@@ -435,6 +536,82 @@
   // ハイライト制御
   // ==========================================================================
 
+  /** 進行中のスクロールアニメをキャンセルするためのフラグ */
+  let currentScrollToken = 0;
+
+  /**
+   * 指定要素を内包する最寄のスクロールコンテナを返す。
+   * 見つからなければ window スクロール扱い (document.scrollingElement)。
+   */
+  function findScrollContainer(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body && node !== document.documentElement) {
+      const style = window.getComputedStyle(node);
+      const overflowY = style.overflowY;
+      const canScrollY = (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay');
+      if (canScrollY && node.scrollHeight > node.clientHeight + 1) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  /** easeInOutCubic : 加速→等速っぽい巡航→減速 で品のある軌道 */
+  function easeInOutCubic(t) {
+    return t < 0.5
+      ? 4 * t * t * t
+      : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  /**
+   * 要素を画面中央へ滑らかにスクロールする。requestAnimationFrame で
+   * easeInOutCubic を効かせ、ブラウザ標準より少し長めに見せて高級感を出す。
+   */
+  function smoothScrollIntoView(el) {
+    const token = ++currentScrollToken;
+    const container = findScrollContainer(el);
+    const isWindow = (container === document.scrollingElement || container === document.documentElement);
+
+    const elRect = el.getBoundingClientRect();
+    let startY;
+    let viewportH;
+    let containerTop;
+
+    if (isWindow) {
+      startY = window.scrollY || window.pageYOffset || 0;
+      viewportH = window.innerHeight;
+      containerTop = 0;
+    } else {
+      startY = container.scrollTop;
+      const cRect = container.getBoundingClientRect();
+      viewportH = container.clientHeight;
+      containerTop = cRect.top;
+    }
+
+    const elCenterFromContainerTop = (elRect.top - containerTop) + elRect.height / 2;
+    const targetY = startY + elCenterFromContainerTop - viewportH / 2;
+    const delta = targetY - startY;
+
+    if (Math.abs(delta) < 2) return;
+
+    const start = performance.now();
+    const duration = SCROLL_DURATION_MS;
+
+    function step(now) {
+      if (token !== currentScrollToken) return;
+      const t = Math.min(1, (now - start) / duration);
+      const y = startY + delta * easeInOutCubic(t);
+      if (isWindow) {
+        window.scrollTo(0, y);
+      } else {
+        container.scrollTop = y;
+      }
+      if (t < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
   /**
    * 指定要素にハイライトクラスを付与し、スクロールで画面中央に表示する。
    * 既存ハイライトは事前にクリアする。一定時間後に自動解除。
@@ -449,10 +626,11 @@
     currentHighlightEl = el;
 
     try {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      smoothScrollIntoView(el);
     } catch (e) {
-      // 古いブラウザ向けフォールバック
-      el.scrollIntoView();
+      // 何かあれば標準スクロールにフォールバック
+      try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      catch (_) { el.scrollIntoView(); }
     }
 
     currentHighlightTimer = window.setTimeout(function () {
@@ -476,14 +654,12 @@
   // ==========================================================================
 
   chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
-    if (!msg || typeof msg !== 'object') return;
+    if (!msg || typeof msg !== 'object') return false;
 
     // ---------------------------------------------------------------------
-    // キャプチャ一覧取得
+    // キャプチャ一覧取得 (同期応答)
     // ---------------------------------------------------------------------
     if (msg.type === 'getCaptures') {
-      // 現在のダッシュボードに属するキャプチャだけを返す。
-      // dashboardKey が無い (旧バージョンで取得したもの) は念のため通す。
       const currentKey = getDashboardKey();
       const list = [].concat(
         Array.from(captures.values()),
@@ -491,41 +667,42 @@
       ).filter(function (c) {
         if (!c.dashboardKey) return true;
         return c.dashboardKey === currentKey;
+      }).map(function (c) {
+        // レイアウト API から取得済の title があれば付与する。
+        // popup 側のカード表示はこれを優先利用する。
+        const title = c.queryId ? queryIdToTitle.get(c.queryId) : null;
+        return title ? Object.assign({}, c, { title: title }) : c;
       }).sort(function (a, b) {
         return b.timestamp - a.timestamp;
       });
       sendResponse({ captures: list });
-      return;
+      return false;
     }
 
     // ---------------------------------------------------------------------
-    // ウィジェット情報のみ取得 (可視列ラベル)
+    // ウィジェット情報のみ取得 (非同期応答 — findBestWidget が async)
     // ---------------------------------------------------------------------
     if (msg.type === 'getWidgetInfo') {
-      const widget = findBestWidget(msg.columnLabels);
-      if (!widget) {
-        sendResponse({ found: false, visibleLabels: [] });
-        return;
-      }
-      sendResponse({
-        found: true,
-        visibleLabels: collectVisibleHeaders(widget, msg.columnLabels)
-      });
-      return;
+      findBestWidget(msg.columnLabels, msg.queryId).then(function (widget) {
+        if (!widget) { sendResponse({ found: false, visibleLabels: [] }); return; }
+        sendResponse({
+          found: true,
+          visibleLabels: collectVisibleHeaders(widget, msg.columnLabels)
+        });
+      }).catch(function () { sendResponse({ found: false, visibleLabels: [] }); });
+      return true;
     }
 
     // ---------------------------------------------------------------------
-    // ハイライト
+    // ハイライト (非同期応答)
     // ---------------------------------------------------------------------
     if (msg.type === 'highlightWidget') {
-      const widget = findBestWidget(msg.columnLabels);
-      if (!widget) {
-        sendResponse({ found: false });
-        return;
-      }
-      applyHighlight(widget);
-      sendResponse({ found: true });
-      return;
+      findBestWidget(msg.columnLabels, msg.queryId).then(function (widget) {
+        if (!widget) { sendResponse({ found: false }); return; }
+        applyHighlight(widget);
+        sendResponse({ found: true });
+      }).catch(function () { sendResponse({ found: false }); });
+      return true;
     }
 
     // ---------------------------------------------------------------------
@@ -534,7 +711,8 @@
     if (msg.type === 'clearHighlight') {
       clearHighlight();
       sendResponse({ ok: true });
-      return;
+      return false;
     }
+    return false;
   });
 })();

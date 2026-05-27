@@ -18,24 +18,29 @@
 
 <style>
   /* ------------------------------------------------------------------------ */
-  /* デザイントークン                                                          */
+  /* デザイントークン (Claude デスクトップアプリのトーン)                      */
+  /*   - クリーム地 (#faf9f5) にテラコッタ (#cc785c) のアクセント              */
+  /*   - 角丸は 6-8px の控えめサイズ                                            */
+  /*   - 影は暖色を混ぜた極薄                                                  */
   /* ------------------------------------------------------------------------ */
   :root {
-    --bg: #f5f7fa;
+    --bg: #faf9f5;
     --card: #ffffff;
-    --border: #e2e8f0;
-    --border-strong: #cbd5e1;
-    --text: #0f172a;
-    --text-secondary: #475569;
-    --text-muted: #94a3b8;
-    --primary: #0d9aa0;
-    --primary-hover: #0a7e83;
-    --primary-soft: #e6f5f5;
-    --warn-soft: #fef3c7;
-    --warn-text: #92400e;
-    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
-    --shadow-md: 0 1px 3px rgba(15, 23, 42, 0.05),
-                 0 4px 12px rgba(15, 23, 42, 0.05);
+    --card-tint: #fdfcf8;
+    --border: #ece8df;
+    --border-strong: #d9d3c4;
+    --text: #1f1d18;
+    --text-secondary: #5a564c;
+    --text-muted: #948c7c;
+    --primary: #cc785c;
+    --primary-hover: #b56248;
+    --primary-soft: #f7ece5;
+    --primary-deep: #8b3f25;
+    --warn-soft: #f7eccb;
+    --warn-text: #7a5414;
+    --shadow-sm: 0 1px 2px rgba(60, 40, 20, 0.05);
+    --shadow-md: 0 1px 3px rgba(60, 40, 20, 0.06),
+                 0 4px 14px rgba(60, 40, 20, 0.06);
   }
 
   * { box-sizing: border-box; }
@@ -59,9 +64,10 @@
     justify-content: space-between;
     align-items: center;
     padding: 12px 16px;
-    background: linear-gradient(135deg, var(--primary) 0%, #0a7e83 100%);
-    color: #fff;
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-deep) 100%);
+    color: #fdfcf8;
     box-shadow: var(--shadow-sm);
+    border-bottom: 1px solid rgba(60, 40, 20, 0.08);
   }
   .header-title { display: flex; align-items: center; gap: 8px; }
   .header-title h1 {
@@ -73,8 +79,8 @@
   .header-logo {
     width: 22px;
     height: 22px;
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 5px;
+    background: rgba(255, 248, 240, 0.18);
+    border-radius: 6px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -88,23 +94,24 @@
   /* ------------------------------------------------------------------------ */
   .btn {
     font-size: 12px;
-    padding: 5px 12px;
+    padding: 6px 12px;
     cursor: pointer;
-    border-radius: 5px;
+    border-radius: 6px;
     font-family: inherit;
     font-weight: 500;
-    transition: all 0.15s ease;
+    letter-spacing: 0.1px;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
     border: 1px solid transparent;
   }
   .btn-ghost {
-    background: rgba(255, 255, 255, 0.15);
-    color: #fff;
-    border-color: rgba(255, 255, 255, 0.2);
+    background: rgba(255, 248, 240, 0.18);
+    color: #fdfcf8;
+    border-color: rgba(255, 248, 240, 0.25);
   }
-  .btn-ghost:hover { background: rgba(255, 255, 255, 0.25); }
+  .btn-ghost:hover { background: rgba(255, 248, 240, 0.28); }
   .btn-primary {
     background: var(--primary);
-    color: #fff;
+    color: #fdfcf8;
     border-color: var(--primary);
   }
   .btn-primary:hover {
@@ -112,16 +119,17 @@
     border-color: var(--primary-hover);
   }
   .btn-secondary {
-    background: #fff;
+    background: var(--card);
     color: var(--text-secondary);
     border-color: var(--border-strong);
   }
   .btn-secondary:hover {
-    background: #f8fafc;
+    background: var(--card-tint);
     color: var(--text);
+    border-color: var(--primary);
   }
   .btn:disabled {
-    opacity: 0.6;
+    opacity: 0.55;
     cursor: not-allowed;
   }
 
@@ -136,14 +144,14 @@
     padding: 40px 16px;
     text-align: center;
     line-height: 1.6;
-    background: var(--card);
+    background: var(--card-tint);
     border-radius: 8px;
-    border: 1px dashed var(--border);
+    border: 1px dashed var(--border-strong);
   }
   .empty-icon {
     font-size: 28px;
     margin-bottom: 8px;
-    opacity: 0.5;
+    opacity: 0.55;
   }
 
   /* キャプチャカード */
@@ -154,11 +162,24 @@
     padding: 12px 14px;
     margin-bottom: 8px;
     box-shadow: var(--shadow-sm);
-    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    transition: box-shadow 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
   }
   .item:hover {
     box-shadow: var(--shadow-md);
     border-color: var(--border-strong);
+  }
+
+  /* ウィジェットタイトル (レイアウト API 由来) */
+  .item-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 2px 0;
+    letter-spacing: 0.1px;
   }
 
   /* ラベル入力 */
@@ -182,11 +203,11 @@
   }
   .item-label-row input:hover {
     border-color: var(--border);
-    background: #f8fafc;
+    background: var(--card-tint);
   }
   .item-label-row input:focus {
     border-color: var(--primary);
-    background: #fff;
+    background: var(--card);
     outline: none;
     box-shadow: 0 0 0 3px var(--primary-soft);
   }
@@ -212,10 +233,10 @@
     align-items: center;
     gap: 4px;
     padding: 2px 8px;
-    background: #f1f5f9;
-    border-radius: 4px;
+    background: var(--primary-soft);
+    border-radius: 5px;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--primary-deep);
   }
   .meta-badge.warn {
     background: var(--warn-soft);
@@ -230,9 +251,10 @@
     font-family: ui-monospace, "SF Mono", Consolas, monospace;
     font-size: 10px;
     color: var(--text-muted);
-    background: #f1f5f9;
+    background: var(--card-tint);
+    border: 1px solid var(--border);
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 5px;
   }
 
   /* 列名チップ (データ型ごとに配色) */
@@ -247,7 +269,7 @@
     align-items: center;
     gap: 4px;
     padding: 3px 9px;
-    border-radius: 4px;
+    border-radius: 5px;
     font-size: 11px;
     line-height: 1.5;
     font-family: ui-monospace, "SF Mono", Consolas, monospace;
@@ -260,25 +282,26 @@
     height: 6px;
     border-radius: 50%;
     background: currentColor;
-    opacity: 0.6;
+    opacity: 0.55;
   }
-  .col-chip.type-varchar   { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
-  .col-chip.type-bigint    { background: #fef3c7; color: #92400e; border-color: #fde68a; }
-  .col-chip.type-int       { background: #fef3c7; color: #92400e; border-color: #fde68a; }
-  .col-chip.type-double    { background: #fef3c7; color: #92400e; border-color: #fde68a; }
-  .col-chip.type-timestamp { background: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
-  .col-chip.type-date      { background: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
-  .col-chip.type-boolean   { background: #ede9fe; color: #5b21b6; border-color: #ddd6fe; }
-  .col-chip.type-default   { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
+  /* 暖色寄りのトーンで型を区別 (Claude UI に寄せたパレット) */
+  .col-chip.type-varchar   { background: #f4efe7; color: #5a564c; border-color: #e6dfd1; }
+  .col-chip.type-bigint    { background: #f4e3d0; color: #8b5424; border-color: #ead2b3; }
+  .col-chip.type-int       { background: #f4e3d0; color: #8b5424; border-color: #ead2b3; }
+  .col-chip.type-double    { background: #f4e3d0; color: #8b5424; border-color: #ead2b3; }
+  .col-chip.type-timestamp { background: #e8e3d3; color: #5e5a40; border-color: #d8d1bb; }
+  .col-chip.type-date      { background: #e8e3d3; color: #5e5a40; border-color: #d8d1bb; }
+  .col-chip.type-boolean   { background: #f0e1d7; color: #74452c; border-color: #e3cdbd; }
+  .col-chip.type-default   { background: #f4efe7; color: #5a564c; border-color: #e6dfd1; }
 
   /* 表示/非表示の状態オーバーレイ
      ウィジェット検出に成功した場合のみクラスが付与される。
      - chip-visible : 何もしない (型クラスのカラーをそのまま生かす)
      - chip-hidden  : グレーアウト + 点線枠で UI 上に出ていない列であることを示す */
   .col-chip.chip-hidden {
-    background: #f8fafc !important;
-    color: #94a3b8 !important;
-    border-color: #cbd5e1 !important;
+    background: var(--card-tint) !important;
+    color: var(--text-muted) !important;
+    border-color: var(--border) !important;
     border-style: dashed !important;
   }
   .col-chip.chip-hidden::before {
