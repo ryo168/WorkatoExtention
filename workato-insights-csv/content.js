@@ -661,6 +661,17 @@
     // ---------------------------------------------------------------------
     if (msg.type === 'getCaptures') {
       const currentKey = getDashboardKey();
+
+      // 現在の DOM 上のウィジェット並び順を index 化しておく。
+      // popup のカード表示順をダッシュボード上の見た目順 (左上→右下) に一致させる
+      // ため、queryId → widgetId → DOM index で並び替える。
+      const domOrder = new Map();
+      const widgetEls = document.querySelectorAll(INSIGHTS_WIDGET_SELECTOR);
+      for (let i = 0; i < widgetEls.length; i++) {
+        const id = widgetEls[i].getAttribute('data-id');
+        if (id) domOrder.set(id, i);
+      }
+
       const list = [].concat(
         Array.from(captures.values()),
         orphans
@@ -673,6 +684,13 @@
         const title = c.queryId ? queryIdToTitle.get(c.queryId) : null;
         return title ? Object.assign({}, c, { title: title }) : c;
       }).sort(function (a, b) {
+        // 主キー: DOM 順。レイアウト API 未取得 or DOM に該当無しは末尾固め。
+        // 副キー: タイムスタンプ降順 (DOM index 同値時の安定化)。
+        const aWid = a.queryId ? queryIdToWidgetId.get(a.queryId) : null;
+        const bWid = b.queryId ? queryIdToWidgetId.get(b.queryId) : null;
+        const aIdx = (aWid != null && domOrder.has(aWid)) ? domOrder.get(aWid) : Infinity;
+        const bIdx = (bWid != null && domOrder.has(bWid)) ? domOrder.get(bWid) : Infinity;
+        if (aIdx !== bIdx) return aIdx - bIdx;
         return b.timestamp - a.timestamp;
       });
       sendResponse({ captures: list });
