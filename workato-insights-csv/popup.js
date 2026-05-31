@@ -1,34 +1,20 @@
 /**
- * popup.js
- * ----------------------------------------------------------------------------
- * 実行コンテキスト : 拡張機能のポップアップ (popup.html) 内
- * 役割            :
- *   - アクティブタブの content script からキャプチャを取得し UI に描画
- *   - 各カードに 3 アクション: ハイライト / 全列 CSV / 表示列のみ CSV
- *   - ラベル (queryId -> 任意の表示名) を chrome.storage.local に永続化
- *
- * セキュリティ方針 :
- *   - すべての描画は textContent / DOM API で行い、innerHTML を使わない
- *   - 外部ネットワーク通信は行わない (Blob によるローカル DL のみ)
- *   - ラベルは chrome.storage.local (同期なし) にのみ保存し、文字数を制限する
- * ----------------------------------------------------------------------------
+ * popup.js  (popup.html 内)
+ * content script からキャプチャを取得して UI 描画し、各カードに
+ * ハイライト / 全列 CSV / 表示列のみ CSV の 3 アクションを提供する。
+ * ラベルは chrome.storage.local に保存。描画は textContent のみ (innerHTML 不使用)、
+ * CSV は Blob でローカル DL するだけで外部通信はしない。
  */
 
 (function () {
   'use strict';
 
-  // ==========================================================================
-  // 要素参照
-  // ==========================================================================
+  // --- 要素参照 ---
   const listEl = document.getElementById('list');
   const refreshBtn = document.getElementById('refresh');
 
-  // ==========================================================================
-  // 状態キャッシュ
-  //   常に「現在のページで表示中のテーブル」のみを表示する。Insights の別タブに
-  //   移動した場合、前タブのウィジェットは DOM から消えるため自動的にリストから
-  //   外れる。明示的なクリア操作は不要 (ページリロードで完全リセット可能)。
-  // ==========================================================================
+  // 常に「現在のページで表示中のテーブル」のみを表示する。別タブへ移動すると前タブの
+  // widget は DOM から消えるため自動的にリストから外れる (明示クリアは不要)。
   const state = {
     /** 最新キャプチャ一覧 */
     captures: [],
@@ -38,17 +24,13 @@
     labels: {}
   };
 
-  // ==========================================================================
-  // 定数
-  // ==========================================================================
+  // --- 定数 ---
   const LABEL_MAX_LEN = 100;
   const LABEL_STORAGE_KEY = 'labels';
   const FILENAME_MAX_LEN = 80;
   const FLASH_FEEDBACK_MS = 1500;
 
-  // ==========================================================================
-  // タブ / URL ユーティリティ
-  // ==========================================================================
+  // --- タブ / URL ユーティリティ ---
 
   async function getActiveTab() {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -64,9 +46,7 @@
     }
   }
 
-  // ==========================================================================
-  // ラベル永続化 (chrome.storage.local)
-  // ==========================================================================
+  // --- ラベル永続化 (chrome.storage.local) ---
 
   async function getLabels() {
     const r = await chrome.storage.local.get(LABEL_STORAGE_KEY);
@@ -86,18 +66,9 @@
     await chrome.storage.local.set({ [LABEL_STORAGE_KEY]: labels });
   }
 
-  // ==========================================================================
-  // content script との通信
-  // ==========================================================================
+  // --- content script との通信 ---
 
-  /**
-   * content script にメッセージを送信する汎用ヘルパ。
-   * content script 未注入 / 通信エラーの場合は null を返す。
-   *
-   * @param {number} tabId
-   * @param {object} message
-   * @returns {Promise<any|null>}
-   */
+  // content script 未注入 / 通信エラーの場合は null を返す
   function sendToContent(tabId, message) {
     return new Promise(function (resolve) {
       try {
@@ -120,9 +91,7 @@
     return Array.isArray(resp.captures) ? resp.captures : [];
   }
 
-  // ==========================================================================
-  // CSV 変換
-  // ==========================================================================
+  // --- CSV 変換 ---
 
   /** CSV フィールドのエスケープ (RFC 4180 準拠) */
   function csvEscape(v) {
@@ -134,7 +103,7 @@
     } else if (typeof v === 'number' || typeof v === 'boolean') {
       s = String(v);
     } else {
-      // 配列・オブジェクトは JSON 文字列化して安全に格納
+      // 配列・オブジェクトは JSON 文字列化して格納
       s = JSON.stringify(v);
     }
 
@@ -144,14 +113,8 @@
     return s;
   }
 
-  /**
-   * Insights のレスポンス (列指向) を CSV 文字列に変換する。
-   * Excel での文字化け回避のため先頭に UTF-8 BOM を付与する。
-   *
-   * @param {object} capture
-   * @param {number[]|null} columnIndices フィルタしたい列インデックス (null なら全列)
-   * @returns {string}
-   */
+  // 列指向のキャプチャを CSV 文字列に変換する。columnIndices が null なら全列。
+  // Excel の文字化け回避のため先頭に UTF-8 BOM を付与する。
   function toCSV(capture, columnIndices) {
     const indices = (Array.isArray(columnIndices) && columnIndices.length > 0)
       ? columnIndices
@@ -178,14 +141,7 @@
     return '﻿' + lines.join('\r\n');
   }
 
-  /**
-   * 表示列ラベル配列から、capture.columns 上のインデックス配列を求める。
-   * 元の列順を維持する。
-   *
-   * @param {object} capture
-   * @param {string[]} visibleLabels
-   * @returns {number[]}
-   */
+  // 表示列ラベル配列から capture.columns 上のインデックス配列を求める (元の列順を維持)
   function visibleLabelsToIndices(capture, visibleLabels) {
     if (!Array.isArray(visibleLabels) || visibleLabels.length === 0) return [];
     const want = new Set(visibleLabels.map(normalizeLabel));
@@ -228,13 +184,11 @@
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    // メモリリーク回避のため少し遅延して URL を解放
+    // メモリリーク回避のため遅延して解放
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
 
-  // ==========================================================================
-  // データ型 → CSS クラス
-  // ==========================================================================
+  // --- データ型 → CSS クラス ---
 
   function typeClass(t) {
     const s = String(t || '').toLowerCase();
@@ -248,9 +202,7 @@
     return 'type-default';
   }
 
-  // ==========================================================================
-  // 描画ヘルパ
-  // ==========================================================================
+  // --- 描画ヘルパ ---
 
   function renderEmpty(message, icon) {
     listEl.textContent = '';
@@ -275,12 +227,8 @@
     listEl.appendChild(div);
   }
 
-  /**
-   * state に基づきリスト本体を描画。
-   * content script 側で既にダッシュボード単位で絞り込まれた結果が state.captures に
-   * 入っているため、ここでは追加の絞り込みは行わない (vmap はチップ色付けにのみ使用)。
-   * 通信は伴わず、キャッシュからのみ再描画する。
-   */
+  // state のキャッシュからリストを再描画する (通信なし)。
+  // ダッシュボード単位の絞り込みは content script 側で済んでいる。
   function renderList() {
     listEl.textContent = '';
 
@@ -299,7 +247,7 @@
     });
   }
 
-  /** ボタンに一時的にフィードバック文言を表示し、自動復元する */
+  // ボタンに一時的にフィードバック文言を表示し自動復元する
   function flashButton(btn, tempText, ms) {
     const orig = btn.textContent;
     btn.textContent = tempText;
@@ -310,7 +258,7 @@
     }, ms || FLASH_FEEDBACK_MS);
   }
 
-  /** capture から正規のラベル文字列配列を取り出す */
+  // capture から正規のラベル文字列配列を取り出す
   function extractLabels(cap) {
     const out = [];
     if (!cap || !Array.isArray(cap.columns)) return out;
@@ -323,20 +271,13 @@
     return out;
   }
 
-  /** ラベルの正規化 (content.js の normalizeLabel と一致させる) */
+  // content.js の normalizeLabel と一致させること
   function normalizeLabel(s) {
     return String(s == null ? '' : s).trim().toLowerCase();
   }
 
-  /**
-   * 各キャプチャに対応する可視列ラベル集合を取得する。
-   * - ウィジェット検出に成功: Set<string> (正規化済み) を返す
-   * - 検出失敗 or queryId 無し: null (= 判定不能)
-   *
-   * @param {number} tabId
-   * @param {object[]} captures
-   * @returns {Promise<(Set<string>|null)[]>}
-   */
+  // 各キャプチャの可視列ラベル集合を取得する。
+  // 検出成功: Set<string> (正規化済み) / 検出失敗 or queryId 無し: null (判定不能)。
   async function fetchVisibilityMaps(tabId, captures) {
     const tasks = captures.map(function (cap) {
       const labels = extractLabels(cap);
@@ -357,25 +298,14 @@
     return Promise.all(tasks);
   }
 
-  // ==========================================================================
-  // 1 件分のカードを構築
-  // ==========================================================================
+  // --- 1 件分のカードを構築 ---
 
-  /**
-   * 1 件のキャプチャを表すカード DOM を生成する。
-   *
-   * @param {object} cap キャプチャ
-   * @param {string} labelText ユーザーが付けたラベル
-   * @param {Set<string>|null} visibleSet 正規化済み可視ラベル集合 (null = 判定不能)
-   * @returns {HTMLElement}
-   */
+  // visibleSet は正規化済み可視ラベル集合 (null = 判定不能)
   function buildItem(cap, labelText, visibleSet) {
     const item = document.createElement('div');
     item.className = 'item';
 
-    // ----------------------------------------------------------------------
-    // (0) ウィジェットタイトル (レイアウト API から取得した settings.title)
-    // ----------------------------------------------------------------------
+    // (0) ウィジェットタイトル (レイアウト API の settings.title)
     if (cap.title) {
       const titleEl = document.createElement('div');
       titleEl.className = 'item-title';
@@ -384,9 +314,7 @@
       item.appendChild(titleEl);
     }
 
-    // ----------------------------------------------------------------------
     // (1) ラベル入力行
-    // ----------------------------------------------------------------------
     const labelRow = document.createElement('div');
     labelRow.className = 'item-label-row';
 
@@ -409,9 +337,7 @@
     labelRow.appendChild(input);
     item.appendChild(labelRow);
 
-    // ----------------------------------------------------------------------
     // (2) メタ行
-    // ----------------------------------------------------------------------
     const meta = document.createElement('div');
     meta.className = 'item-meta';
 
@@ -442,11 +368,7 @@
 
     item.appendChild(meta);
 
-    // ----------------------------------------------------------------------
-    // (3) 列名チップ
-    //     visibleSet が与えられている場合は chip-visible / chip-hidden を付与し
-    //     UI 上での表示有無を視覚的に区別する。
-    // ----------------------------------------------------------------------
+    // (3) 列名チップ (visibleSet があれば chip-visible / chip-hidden を付与)
     const cols = document.createElement('div');
     cols.className = 'item-cols';
     cap.columns.forEach(function (c) {
@@ -482,9 +404,7 @@
     });
     item.appendChild(cols);
 
-    // ----------------------------------------------------------------------
     // (4) アクションボタン
-    // ----------------------------------------------------------------------
     const actions = document.createElement('div');
     actions.className = 'item-actions';
 
@@ -581,17 +501,12 @@
     return item;
   }
 
-  // ==========================================================================
-  // メイン描画
-  // ==========================================================================
+  // --- メイン描画 ---
 
-  /**
-   * popup を全面再描画する。content script と通信して最新キャプチャ・可視判定を
-   * 取り直し、state にキャッシュした上で filterBar / list を描画する。
-   * フィルタ切替時はこの関数ではなく renderFilterBar / renderList を直接呼ぶ。
-   */
+  // content script と通信して最新キャプチャ・可視判定を取り直し、state に
+  // キャッシュした上でリストを描画する。フィルタ切替時は renderList を直接呼ぶ。
   async function render() {
-    // 描画前にキャッシュリセット (描画が空状態で終わる経路でも state を綺麗に保つ)
+    // 空状態で終わる経路でも state を綺麗に保つため先にリセット
     state.captures = [];
     state.visibilityMaps = [];
 
@@ -619,8 +534,7 @@
       return;
     }
 
-    // 各キャプチャに対応する可視列ラベルを並列取得
-    // (ウィジェット未検出 = "現在のページ" 以外と判定。null として保持)
+    // 各キャプチャの可視列ラベルを並列取得 (widget 未検出は null として保持)
     const visibilityMaps = await fetchVisibilityMaps(tab.id, captures);
     const labels = await getLabels();
 
@@ -631,9 +545,7 @@
     renderList();
   }
 
-  // ==========================================================================
-  // イベントバインド
-  // ==========================================================================
+  // --- イベントバインド ---
 
   refreshBtn.addEventListener('click', function () {
     render().catch(function () { /* noop */ });

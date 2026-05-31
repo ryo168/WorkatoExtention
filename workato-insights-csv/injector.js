@@ -1,19 +1,7 @@
 /**
- * injector.js
- * ----------------------------------------------------------------------------
- * 実行コンテキスト : ページの MAIN world (manifest の content_scripts で指定)
- * 役割            : Workato Insights が発行する Crow-QL リクエストの fetch/XHR
- *                   をフックし、レスポンス JSON を content script へ転送する。
- *
- * セキュリティ方針 :
- *   - 既存リクエストの「観測のみ」を行い、追加のネットワーク通信は一切発生
- *     させない (response.clone() でクローンしてから JSON を読む)。
- *   - エラーは握りつぶし、Workato 本体の動作には影響させない。
- *   - 外部に postMessage しない。target origin は '*' だが宛先は同一ウィンドウ
- *     なので外部から参照される経路は存在しない。
- *   - eval / new Function / 動的 script 生成は一切行わない。
- *   - 取得対象 URL は ENDPOINT_RE で厳格に絞り込む。
- * ----------------------------------------------------------------------------
+ * injector.js  (MAIN world)
+ * Workato Insights の Crow-QL リクエスト (fetch/XHR) をフックし、レスポンス JSON を
+ * content script へ転送する。観測のみで追加通信はしない (response.clone() で読む)。
  */
 
 (function () {
@@ -22,22 +10,14 @@
   /** Workato Insights のチャートデータ取得エンドポイント (POST) */
   const ENDPOINT_RE = /\/insights\/crow-ql\/api\/v2\/execute/;
 
-  /**
-   * レイアウト API の URL は環境/バージョン差があるため URL では絞らない。
-   * 代わりに全 JSON レスポンスの形を覗き、layout 構造を含むものだけ採用する。
-   * これは『同じ列名のテーブルが複数ある』ケースで text 一致が使えないため、
-   * queryId → data-id を必ず取りたいことから、漏れの少ない方針にしている。
-   */
+  // レイアウト API は環境/バージョンで URL が変わるため URL では絞らず、
+  // 全 JSON レスポンスの形を見て layout 構造を含むものだけ採用する。
 
-  /** content script との通信に用いる固定タグ (postMessage 偽装対策) */
+  /** content script との通信タグ (postMessage 偽装対策) */
   const MESSAGE_SOURCE = 'wkt-csv-ext';
 
-  /**
-   * 診断ログ。Workato 側のエンドポイント変更や Angular の内部構造変更で
-   * 動作不能になった際、ユーザが DevTools コンソールで何が起きてるか
-   * 即座に判別できるよう、目印付きで出力する。
-   * 性能上の影響はほぼ無いので常時有効としている。
-   */
+  // エンドポイント変更や Angular の内部構造変更で動作不能になった際に
+  // DevTools で原因を追えるよう、目印付きで常時出力する。
   function debug() {
     try {
       const args = Array.prototype.slice.call(arguments);
@@ -47,16 +27,8 @@
     } catch (e) { /* noop */ }
   }
 
-  /**
-   * 現在のページがどの Insights ダッシュボードを表示しているかを示す識別子。
-   *   - `?handle=idb-XXX` (Workato Insights の標準)
-   *   - `/dashboards/idb-XXX` (パスベース URL)
-   *   - 上記いずれも無ければ pathname をそのまま使用
-   * これを各キャプチャに付与しておき、popup 側で現在のダッシュボードに属する
-   * キャプチャのみを表示する。
-   *
-   * @returns {string}
-   */
+  // 表示中の Insights ダッシュボード識別子。各キャプチャに付与し、popup 側で
+  // 現在のダッシュボードに属するものだけ表示するために使う。
   function getDashboardKey() {
     try {
       const url = new URL(window.location.href);
@@ -70,14 +42,10 @@
     }
   }
 
-  // --------------------------------------------------------------------------
-  // ユーティリティ
-  // --------------------------------------------------------------------------
+  // --- 通信 ---
 
-  /**
-   * 同一ウィンドウ内の content script (ISOLATED world) へキャプチャを通知する。
-   * @param {object} payload キャプチャしたデータ
-   */
+  // targetOrigin は '*' だが宛先は同一ウィンドウ (event.source === window で検証)
+  // のため外部から参照される経路はない。
   function postCapture(payload) {
     window.postMessage(
       { source: MESSAGE_SOURCE, type: 'capture', payload: payload },
@@ -85,10 +53,6 @@
     );
   }
 
-  /**
-   * ダッシュボードレイアウトから取り出した queryId → widgetId 対応を通知する。
-   * @param {{dashboardKey: string, mappings: {queryId: string, widgetId: string}[]}} payload
-   */
   function postLayout(payload) {
     window.postMessage(
       { source: MESSAGE_SOURCE, type: 'layout', payload: payload },
@@ -96,14 +60,8 @@
     );
   }
 
-  /**
-   * レスポンスがダッシュボードレイアウト JSON っぽいか判定。
-   * URL を頼らない都合で形で見るが、Workato 側で複数バージョン/エンドポイントが
-   * あるため、以下のいずれかに該当すれば候補として扱う。
-   *   - result が配列で、要素のどれかが content.layout を持つ
-   *   - 自身が content.layout を持つ (単一ダッシュボード取得)
-   *   - 自身が type === 'dashboard' と layout を持つ
-   */
+  // レスポンスがダッシュボードレイアウト JSON っぽいか形で判定する
+  // (Workato 側に複数バージョン/エンドポイントがあるため URL を頼らない)。
   function looksLikeLayoutResponse(json) {
     if (!json || typeof json !== 'object') return false;
     if (Array.isArray(json.result)) {
@@ -118,15 +76,9 @@
     return false;
   }
 
-  /**
-   * レイアウト JSON を再帰的に走査し、queryId を持つウィジェット (= type:"dashboard")
-   * の { widgetId, queryId, title, name } を全て収集する。
-   * title は settings.title (UI 上の表示タイトル)、name は widget.name
-   * (Workato エディタ内部の名称) を補助として持つ。
-   *
-   * 構造例: layout = [colCount, [widget, _], [widget, _], ...]
-   *         widget = { id, queryId, name, settings:{ title, ... }, layout?, ... }
-   */
+  // レイアウト JSON を再帰走査し、queryId を持つウィジェットの
+  // { widgetId, queryId, title, name } を全て収集する。
+  // title=settings.title (UI 表示名), name=widget.name (エディタ内部名)。
   function collectWidgetMappings(node, acc) {
     if (!node) return;
     if (Array.isArray(node)) {
@@ -146,11 +98,7 @@
     }
   }
 
-  /**
-   * Workato Insights のレスポンス形式に合致するかを判定する。
-   * @param {*} json レスポンス JSON
-   * @returns {boolean}
-   */
+  // Workato Insights のチャートデータ形式 (columns[] + data[]) か判定する
   function looksLikeInsightsResponse(json) {
     return (
       json &&
@@ -160,11 +108,6 @@
     );
   }
 
-  /**
-   * キャプチャ用のペイロードを生成する。
-   * @param {{queryId: string|null, url: string, method: string, json: object}} args
-   * @returns {object}
-   */
   function buildPayload(args) {
     const json = args.json;
     const firstColumn = json.data[0];
@@ -181,12 +124,7 @@
     };
   }
 
-  /**
-   * リクエストボディから Workato のクエリ ID (UUID) を抽出する。
-   * body は string でも object でも受け付ける。
-   * @param {string|object|null|undefined} body
-   * @returns {string|null}
-   */
+  // リクエストボディからクエリ ID (UUID) を抽出する。body は string でも object でも可。
   function extractQueryId(body) {
     if (!body) return null;
     try {
@@ -197,9 +135,7 @@
     }
   }
 
-  // --------------------------------------------------------------------------
-  // fetch フック
-  // --------------------------------------------------------------------------
+  // --- fetch フック ---
 
   const originalFetch = window.fetch;
   if (typeof originalFetch === 'function') {
@@ -220,18 +156,18 @@
           bodyForId = init.body || null;
         }
       } catch (e) {
-        // 解析失敗時はキャプチャ対象外として処理を続行
+        // 解析失敗時はキャプチャ対象外として続行
       }
 
       const isQueryTarget = ENDPOINT_RE.test(url);
       const queryId = isQueryTarget ? extractQueryId(bodyForId) : null;
 
-      // 元の fetch をそのまま実行 (副作用ゼロを担保)
+      // 元の fetch をそのまま実行 (副作用ゼロ)
       const promise = originalFetch.apply(this, arguments);
 
       return promise.then(
         function (response) {
-          // response.clone() でクローンを取得し、元のレスポンスは一切消費しない
+          // クローンを読み、元のレスポンスは消費しない
           try {
             const cloned = response.clone();
             cloned
@@ -248,7 +184,7 @@
                   );
                   return;
                 }
-                // クエリ以外の JSON は全部レイアウト候補として形だけチェック
+                // クエリ以外の JSON はレイアウト候補として形だけチェック
                 tryEmitLayout(json);
               })
               .catch(function () {
@@ -260,16 +196,13 @@
           return response;
         },
         function (err) {
-          // 元のエラーをそのまま伝搬
           throw err;
         }
       );
     };
   }
 
-  // --------------------------------------------------------------------------
-  // XMLHttpRequest フック (jQuery / 旧 SDK 経由のリクエストに備える)
-  // --------------------------------------------------------------------------
+  // --- XMLHttpRequest フック (jQuery / 旧 SDK 経由に備える) ---
 
   const originalOpen = XMLHttpRequest.prototype.open;
   const originalSend = XMLHttpRequest.prototype.send;
@@ -293,7 +226,6 @@
         if (this.status < 200 || this.status >= 300) return;
         const text = this.responseText;
         if (!text || text.length < 2) return;
-        // JSON ぽくないものは早期除外
         const first = text.charAt(0);
         if (first !== '{' && first !== '[') return;
 
@@ -317,10 +249,6 @@
     return originalSend.apply(this, arguments);
   };
 
-  /**
-   * 任意の JSON にレイアウト構造が含まれていれば mappings を抽出して通知する。
-   * URL を頼りにせず、形だけで判定するためここに集約する。
-   */
   function tryEmitLayout(json) {
     if (!looksLikeLayoutResponse(json)) return;
     const mappings = [];
@@ -333,24 +261,12 @@
     });
   }
 
-  // --------------------------------------------------------------------------
-  // Angular コンポーネントからの queryId 直接取得 (最終手段)
-  //
-  // レイアウト API が何らかの事情でフックを通らない / Capture の queryId と
-  // レイアウト上の queryId が別形式 / 等のケースに備える独立した経路。
-  // MAIN world からのみ Angular の __ngContext__ 内部に到達できるため、
-  // ここ (injector) で実装する。content script は postMessage で要求する。
-  // --------------------------------------------------------------------------
+  // --- Angular コンポーネントからの queryId 直接取得 (最終手段) ---
+  // レイアウト API がフックを通らない等のケースに備える独立経路。
+  // __ngContext__ への到達は MAIN world でしかできないため injector に置く。
 
-  /**
-   * DOM 要素から Angular コンポーネントインスタンスを取得し、深く走査して
-   * queryId 文字列を取り出す。Angular Ivy の __ngContext__ は配列で、その
-   * どこかにコンポーネントインスタンスや入力プロパティが入っている。
-   * 構造が不明瞭なので key の名称を頼りに広く探す。
-   *
-   * @param {Element} el
-   * @returns {string|null}
-   */
+  // DOM 要素の Angular コンポーネント (__ngContext__) を走査して queryId を取り出す。
+  // Ivy の __ngContext__ は構造不定の配列なので key 名を頼りに広く探す。
   function readWidgetQueryId(el) {
     if (!el) return null;
     const ctx = el.__ngContext__;
@@ -358,10 +274,8 @@
     return deepFindString(ctx, 'queryId');
   }
 
-  /**
-   * 任意のオブジェクトツリーを再帰的に走査し、指定 key に文字列値が見つかれば返す。
-   * 巡回・深さ・分岐数を制限し暴走を防ぐ。
-   */
+  // オブジェクトツリーを再帰走査し、指定 key の文字列値を返す。
+  // 深さ・分岐数・巡回を制限して暴走を防ぐ。
   function deepFindString(root, key) {
     const seen = new WeakSet();
     const stack = [{ node: root, depth: 0 }];
@@ -385,7 +299,7 @@
         const keys = Object.keys(node);
         for (let i = 0; i < keys.length && i < MAX_BRANCH; i++) {
           const k = keys[i];
-          // 巡回しがちな循環キーは間引く
+          // 循環しがちなキーは間引く
           if (k === 'parent' || k === '__ngContext__' || k === 'host' || k === 'previousSibling' || k === 'nextSibling') continue;
           stack.push({ node: node[k], depth: depth + 1 });
         }
@@ -394,12 +308,8 @@
     return null;
   }
 
-  /**
-   * 全 lcap-dashboard-widget を走査して queryId → widgetId を構築し、
-   * content script に送信する。レイアウト API を捕まえられない時の保険。
-   *
-   * @returns {number} 抽出できたマッピング数
-   */
+  // 全 lcap-dashboard-widget を走査して queryId → widgetId を構築し送信する。
+  // レイアウト API を捕まえられない時の保険。
   function emitMappingsFromDom() {
     const widgets = document.querySelectorAll('lcap-dashboard-widget');
     if (widgets.length === 0) return 0;
@@ -420,7 +330,7 @@
     return mappings.length;
   }
 
-  // content script からの問い合わせを受けて DOM スキャンを実行
+  // content script からの依頼で DOM スキャンを実行
   window.addEventListener('message', function (event) {
     if (event.source !== window) return;
     const msg = event.data;

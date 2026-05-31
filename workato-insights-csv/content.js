@@ -1,42 +1,22 @@
 /**
- * content.js
- * ----------------------------------------------------------------------------
- * 実行コンテキスト : ページの ISOLATED world (Chrome 拡張の通常 content script)
- * 役割            :
- *   1. injector.js から postMessage で送られてくるキャプチャをタブ内メモリに保持
- *   2. popup からの問い合わせに応答
- *      - getCaptures      : 保持中のキャプチャ一覧を返す
- *      - clearCaptures    : キャプチャをクリア
- *      - highlightWidget  : 列ラベルから DOM 上のウィジェットを推定してハイライト
- *      - getWidgetInfo    : 同推定 + ウィジェット内で可視な列ラベル一覧を返す
- *
- * セキュリティ方針 :
- *   - postMessage の発信元検証 (同一ウィンドウ + 専用タグ + ペイロード形状)
- *   - メモリ枯渇対策: タブあたり最大 MAX_CAPTURES 件で打ち切り
- *   - 永続化なし: ページ再読込やタブ破棄でキャプチャは消える (意図的設計)
- *   - 外部送信なし: chrome.runtime.sendMessage も popup への応答にしか使わない
- *   - DOM 探索は対象タグ (SCRIPT/STYLE/NOSCRIPT) を除外し、想定外の領域を走査しない
- * ----------------------------------------------------------------------------
+ * content.js  (ISOLATED world)
+ * injector からのキャプチャをタブ内メモリに保持し、popup からの問い合わせ
+ * (getCaptures / getWidgetInfo / highlightWidget / clearHighlight) に応答する。
+ * 永続化・外部送信はなし。キャプチャはページ再読込で消える (意図的)。
  */
 
 (function () {
   'use strict';
 
-  // ==========================================================================
-  // 定数
-  // ==========================================================================
+  // --- 定数 ---
 
-  /** タブ内に保持するキャプチャの最大件数 */
+  /** タブ内に保持するキャプチャの最大件数 (メモリ枯渇対策) */
   const MAX_CAPTURES = 100;
 
   /** injector が送る固定タグ */
   const MESSAGE_SOURCE = 'wkt-csv-ext';
 
-  /**
-   * 現在のページがどの Insights ダッシュボードを表示しているかを示す識別子。
-   * 詳細は injector.js の同名関数を参照。両者は完全に同じロジック。
-   * @returns {string}
-   */
+  // injector.js の同名関数と完全に同じロジック
   function getDashboardKey() {
     try {
       const url = new URL(window.location.href);
@@ -53,36 +33,24 @@
   /** ハイライトを自動解除するまでのミリ秒 */
   const HIGHLIGHT_DURATION_MS = 3000;
 
-  /** ハイライト適用に使う CSS クラス (content.css 側で定義) */
+  /** ハイライト用 CSS クラス (content.css 側で定義) */
   const HIGHLIGHT_CLASS = 'wkt-csv-highlight';
 
   /** カスタムスムーススクロールの所要時間 (ms) */
   const SCROLL_DURATION_MS = 850;
 
-  /**
-   * ウィジェット推定の最低一致数。
-   *   - 通常は 2 (= 2 列以上一致しないと採用しない)
-   *   - 候補列がもともと 1 つしか無いキャプチャの場合は 1 にフォールバック
-   * Workato Insights の表ウィジェットは API レスポンス上の列のうち UI には
-   * 一部しか表示しないことが多いため、「全列の何%」ではなく「絶対数」で判定する。
-   */
+  // ウィジェット推定の最低一致数。通常 2、候補列が 1 つしかない時は 1 にフォールバック。
+  // 表ウィジェットは API 上の列の一部しか UI 表示しないため割合でなく絶対数で判定する。
   const MIN_MATCH_COUNT = 2;
 
-  /** Workato Insights のダッシュボードウィジェット要素のセレクタ */
+  /** ダッシュボードウィジェット要素のセレクタ */
   const INSIGHTS_WIDGET_SELECTOR = 'lcap-dashboard-widget';
 
-  /** Workato Insights のテーブル列ヘッダ文字列を含む要素のセレクタ */
+  /** テーブル列ヘッダ文字列を含む要素のセレクタ */
   const INSIGHTS_COLUMN_HEADER_SELECTOR = '.data-table-column-title__text';
 
-  /**
-   * ウィジェット内で「列ラベル / 系列名 / 軸タイトル / KPI ラベル」候補が出現
-   * しうる要素のセレクタ群。Workato Insights は表/チャート/KPI で DOM 構造が
-   * 異なるため、テーブル列ヘッダだけ見てるとチャート系のキャプチャを取りこぼす。
-   *  - 表           : .data-table-column-title__text
-   *  - チャート凡例 : .chart-container__legend-item-title
-   *  - チャート軸   : .highcharts-axis-title (SVG <text>)
-   *  - KPI         : .kpi-vis__label
-   */
+  // ラベル/系列名/軸タイトル/KPI ラベル候補が出る要素群。
+  // 表/チャート/KPI で DOM 構造が違うため複数セレクタを束ねる。
   const INSIGHTS_LABEL_SELECTORS = [
     '.data-table-column-title__text',
     '.chart-container__legend-item-title',
@@ -90,10 +58,8 @@
     '.kpi-vis__label'
   ];
 
-  /**
-   * テキストスキャンのフォールバック時に「データ値」を読み飛ばすためのセレクタ。
-   * 表の行セル内文字列はラベルと無関係に列名と偶然一致しがちで、ノイズの元になる。
-   */
+  // テキストスキャンのフォールバック時に読み飛ばす「データ値」セレクタ。
+  // 行セル内文字列は列名と偶然一致しやすくノイズになる。
   const INSIGHTS_DATA_CELL_SELECTORS = [
     'w-data-table-row-cell-value',
     '.data-table-row-cell__value',
@@ -101,9 +67,7 @@
     'lcap-text-widget'
   ].join(',');
 
-  // ==========================================================================
-  // キャプチャ保持
-  // ==========================================================================
+  // --- キャプチャ保持 ---
 
   /** queryId をキーにした最新キャプチャ */
   const captures = new Map();
@@ -111,27 +75,16 @@
   /** queryId が取得できなかったキャプチャの FIFO バッファ */
   const orphans = [];
 
-  /**
-   * queryId → widgetId のマッピング。
-   * Workato Insights のダッシュボードレイアウト API レスポンスから抽出し、
-   * `lcap-dashboard-widget[data-id=...]` に直接ぶつけるための辞書。
-   */
+  // queryId → widgetId。レイアウト API から抽出し data-id 属性で widget を引く辞書。
   const queryIdToWidgetId = new Map();
 
-  /**
-   * queryId → settings.title のマッピング。
-   * data-id 一致が何らかの理由で失敗した時の予備ルートとして、
-   * `.lcap-dashboard-widget__title` のテキスト一致で widget を引く。
-   */
+  // queryId → settings.title。data-id 一致が失敗した時の予備ルート (見出しテキスト一致)。
   const queryIdToTitle = new Map();
 
-  /** ハイライト中の要素 (連打時の解除タイマーをクリアするため) */
   let currentHighlightEl = null;
   let currentHighlightTimer = null;
 
-  // ==========================================================================
-  // ペイロード検証
-  // ==========================================================================
+  // --- ペイロード検証 ---
 
   function isValidCapture(p) {
     return (
@@ -144,9 +97,7 @@
     );
   }
 
-  // ==========================================================================
-  // injector からの postMessage 受信
-  // ==========================================================================
+  // --- injector からの postMessage 受信 ---
 
   window.addEventListener('message', function (event) {
     if (event.source !== window) return;
@@ -185,36 +136,22 @@
     }
   });
 
-  /**
-   * injector (MAIN world) に DOM 上の lcap-dashboard-widget から
-   * Angular コンポーネントを覗いて queryId を取り直すよう依頼する。
-   * レイアウト API 経由のマッピングが空 / 不完全な時の保険。
-   * 結果は通常の 'layout' メッセージで返ってくる。
-   */
+  // injector (MAIN world) に DOM スキャンでの queryId 取得を依頼する。
+  // レイアウト API 経由のマッピングが空/不完全な時の保険。結果は 'layout' で返る。
   function requestDomMapping() {
     try {
       window.postMessage({ source: MESSAGE_SOURCE, type: 'request-dom-mapping' }, '*');
     } catch (e) { /* noop */ }
   }
 
-  // ==========================================================================
-  // ウィジェット推定アルゴリズム
-  // ==========================================================================
+  // --- ウィジェット推定 ---
 
-  /**
-   * 列ラベルの正規化 (前後空白除去 + 小文字化)。
-   * @param {*} s
-   * @returns {string}
-   */
+  // 列ラベルの正規化 (前後空白除去 + 小文字化)
   function normalizeLabel(s) {
     return String(s == null ? '' : s).trim().toLowerCase();
   }
 
-  /**
-   * 列ラベルを正規化済みの配列に変換する (重複除去)。
-   * @param {string[]} columnLabels
-   * @returns {string[]}
-   */
+  // 列ラベルを正規化済み配列に変換する (重複除去)
   function normalizeLabelArray(columnLabels) {
     const out = [];
     const seen = new Set();
@@ -228,15 +165,8 @@
     return out;
   }
 
-  /**
-   * Workato Insights 専用 DOM 構造を直接ターゲットしたウィジェット推定。
-   * `lcap-dashboard-widget` 要素を全件走査し、各ウィジェット内の
-   * `.data-table-column-title__text` のテキストを capture の列ラベルと
-   * 照合する。最も多く一致したウィジェットを返す。
-   *
-   * @param {string[]} normalizedLabels 正規化済みラベル配列
-   * @returns {Element|null}
-   */
+  // 各 widget 内のラベル要素テキストを capture の列ラベルと照合し、
+  // 最も多く一致した widget を返す (同点なら要素数が少ない方)。
   function findWidgetByInsightsStructure(normalizedLabels) {
     const widgets = document.querySelectorAll(INSIGHTS_WIDGET_SELECTOR);
     if (widgets.length === 0) return null;
@@ -280,16 +210,8 @@
     return null;
   }
 
-  /**
-   * フォールバック: Workato 側で DOM 構造が変わった場合に備えた汎用スキャン。
-   *
-   * 構造判定が失敗した時のみ呼ばれる。検索範囲は `lcap-dashboard-widget` 内に
-   * 閉じ込め、データテーブルの行セルやテキストウィジェット本文は除外して
-   * 「列名/系列名と無関係な値が偶然一致してしまうノイズ」を避ける。
-   *
-   * @param {string[]} normalizedLabels 正規化済みラベル配列
-   * @returns {Element|null}
-   */
+  // フォールバック: 専用構造で見つからない時の汎用テキストスキャン。
+  // 検索範囲を widget 内に閉じ、行セル/テキスト本文を除外してノイズを避ける。
   function findWidgetByTextScan(normalizedLabels) {
     const widgets = document.querySelectorAll(INSIGHTS_WIDGET_SELECTOR);
     if (widgets.length === 0) return null;
@@ -315,7 +237,7 @@
             if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') {
               return NodeFilter.FILTER_REJECT;
             }
-            // 行データやテキストウィジェット本文は列名と無関係なのでスキップ
+            // 行データやテキスト本文は列名と無関係なのでスキップ
             if (parent.closest && parent.closest(INSIGHTS_DATA_CELL_SELECTORS)) {
               return NodeFilter.FILTER_REJECT;
             }
@@ -353,18 +275,11 @@
     return null;
   }
 
-  /**
-   * queryId から DOM 上のウィジェットを直接特定する。
-   * Workato Insights のダッシュボードレイアウト API レスポンスを掴めていれば
-   * queryId → widgetId の対応が確実にあり、`data-id` 属性で一発で取れる。
-   *
-   * @param {string} queryId
-   * @returns {Element|null}
-   */
+  // queryId から DOM 上の widget を直接特定する。
+  // ルート1: data-id 直結。ルート2: settings.title で見出しテキスト一致。
   function findWidgetByQueryId(queryId) {
     if (!queryId || typeof queryId !== 'string') return null;
 
-    // ルート1: data-id 直結
     const widgetId = queryIdToWidgetId.get(queryId);
     if (widgetId) {
       const escaped = widgetId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -372,7 +287,6 @@
       if (el) return el;
     }
 
-    // ルート2: settings.title → ウィジェット見出しテキスト一致
     const title = queryIdToTitle.get(queryId);
     if (title) {
       const normTarget = String(title).trim();
@@ -385,25 +299,15 @@
     return null;
   }
 
-  /**
-   * ウィジェットを非同期に推定する。
-   *
-   * 戦略 (上から優先):
-   *   1. queryId + レイアウト API のマッピングがあれば data-id で即特定
-   *   2. queryId はあるがマッピング未取得なら injector に DOM スキャンを依頼し、
-   *      Angular コンポーネントから queryId を読んでマッピングを構築 → 再試行
-   *   3. Workato Insights 専用構造で照合 (列ヘッダ / 凡例 / KPI ラベル / 軸タイトル)
-   *   4. ウィジェット内に閉じたテキストスキャン
-   *
-   * @param {string[]} columnLabels 元のラベル配列 (順序付き)
-   * @param {string|null} queryId キャプチャの queryId (任意)
-   * @returns {Promise<Element|null>}
-   */
+  // ウィジェットを非同期に推定する。優先順:
+  //   1. queryId + レイアウトマッピングがあれば data-id で即特定
+  //   2. マッピング未取得なら injector に DOM スキャンを依頼して再試行
+  //   3. 専用構造で照合 (列ヘッダ/凡例/KPI/軸)
+  //   4. widget 内に閉じたテキストスキャン
   async function findBestWidget(columnLabels, queryId) {
     const direct1 = findWidgetByQueryId(queryId);
     if (direct1) return direct1;
 
-    // マッピング不在 → DOM スキャンを injector に頼んで少し待つ
     if (queryId && typeof queryId === 'string') {
       requestDomMapping();
       const direct2 = await waitForMapping(queryId, 800);
@@ -421,9 +325,7 @@
     return findWidgetByTextScan(normalized);
   }
 
-  /**
-   * queryId のマッピングが届くのを最大 timeoutMs まで待ち、届いたらその要素を返す。
-   */
+  // queryId のマッピング到着を最大 timeoutMs まで待ち、届いたら要素を返す
   function waitForMapping(queryId, timeoutMs) {
     return new Promise(function (resolve) {
       const start = performance.now();
@@ -437,17 +339,9 @@
     });
   }
 
-  // ==========================================================================
-  // 可視判定 / 可視列の抽出
-  // ==========================================================================
+  // --- 可視判定 / 可視列の抽出 ---
 
-  /**
-   * 要素が UI 上に「描画されている」か簡易判定する。
-   * 厳密な可視判定ではなく、display:none / visibility:hidden / サイズ 0 を除外する程度。
-   *
-   * @param {Element} el
-   * @returns {boolean}
-   */
+  // display:none / visibility:hidden / サイズ 0 を除外する程度の簡易可視判定
   function isElementVisible(el) {
     if (!el || !el.getBoundingClientRect) return false;
     const rect = el.getBoundingClientRect();
@@ -458,18 +352,8 @@
     return true;
   }
 
-  /**
-   * 推定したウィジェット内で、UI に表示されている列ラベルを抽出する。
-   * 元のラベル配列の順序を保つ。
-   *
-   * 優先戦略:
-   *   1. Workato Insights のヘッダ要素 (`.data-table-column-title__text`) を直接走査
-   *   2. 見つからなければ TreeWalker でテキストノードを走査
-   *
-   * @param {Element} widgetEl
-   * @param {string[]} allColumnLabels 元のラベル配列 (順序付き)
-   * @returns {string[]} 可視列ラベルの配列 (元の順序を維持)
-   */
+  // widget 内で UI に表示中の列ラベルを、元のラベル配列の順序を保って抽出する。
+  // 優先: 専用ヘッダ要素を直接走査 → 無ければ TreeWalker でテキストノード走査。
   function collectVisibleHeaders(widgetEl, allColumnLabels) {
     if (!widgetEl || !Array.isArray(allColumnLabels)) return [];
 
@@ -482,7 +366,6 @@
 
     const visibleNorms = new Set();
 
-    // -------- 優先: Workato 専用のヘッダ要素を直接走査 --------
     const headerEls = widgetEl.querySelectorAll(INSIGHTS_COLUMN_HEADER_SELECTOR);
     if (headerEls.length > 0) {
       for (let i = 0; i < headerEls.length; i++) {
@@ -494,7 +377,7 @@
         }
       }
     } else {
-      // -------- フォールバック: 汎用 TreeWalker --------
+      // フォールバック: 汎用 TreeWalker
       const walker = document.createTreeWalker(
         widgetEl,
         NodeFilter.SHOW_TEXT,
@@ -532,17 +415,12 @@
     return out;
   }
 
-  // ==========================================================================
-  // ハイライト制御
-  // ==========================================================================
+  // --- ハイライト制御 ---
 
-  /** 進行中のスクロールアニメをキャンセルするためのフラグ */
+  /** 進行中のスクロールアニメをキャンセルするためのトークン */
   let currentScrollToken = 0;
 
-  /**
-   * 指定要素を内包する最寄のスクロールコンテナを返す。
-   * 見つからなければ window スクロール扱い (document.scrollingElement)。
-   */
+  // el を内包する最寄のスクロールコンテナを返す (無ければ window スクロール)
   function findScrollContainer(el) {
     let node = el.parentElement;
     while (node && node !== document.body && node !== document.documentElement) {
@@ -557,17 +435,13 @@
     return document.scrollingElement || document.documentElement;
   }
 
-  /** easeInOutCubic : 加速→等速っぽい巡航→減速 で品のある軌道 */
   function easeInOutCubic(t) {
     return t < 0.5
       ? 4 * t * t * t
       : 1 - Math.pow(-2 * t + 2, 3) / 2;
   }
 
-  /**
-   * 要素を画面中央へ滑らかにスクロールする。requestAnimationFrame で
-   * easeInOutCubic を効かせ、ブラウザ標準より少し長めに見せて高級感を出す。
-   */
+  // 要素を画面中央へ requestAnimationFrame + easeInOutCubic で滑らかにスクロールする
   function smoothScrollIntoView(el) {
     const token = ++currentScrollToken;
     const container = findScrollContainer(el);
@@ -612,12 +486,7 @@
     requestAnimationFrame(step);
   }
 
-  /**
-   * 指定要素にハイライトクラスを付与し、スクロールで画面中央に表示する。
-   * 既存ハイライトは事前にクリアする。一定時間後に自動解除。
-   *
-   * @param {Element} el
-   */
+  // 要素にハイライトを付与し画面中央へスクロール。既存ハイライトは事前解除、一定時間後に自動解除。
   function applyHighlight(el) {
     clearHighlight();
     if (!el) return;
@@ -628,7 +497,7 @@
     try {
       smoothScrollIntoView(el);
     } catch (e) {
-      // 何かあれば標準スクロールにフォールバック
+      // 失敗時は標準スクロールにフォールバック
       try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
       catch (_) { el.scrollIntoView(); }
     }
@@ -649,22 +518,17 @@
     currentHighlightEl = null;
   }
 
-  // ==========================================================================
-  // popup からの問い合わせに応答
-  // ==========================================================================
+  // --- popup からの問い合わせに応答 ---
 
   chrome.runtime.onMessage.addListener(function (msg, _sender, sendResponse) {
     if (!msg || typeof msg !== 'object') return false;
 
-    // ---------------------------------------------------------------------
     // キャプチャ一覧取得 (同期応答)
-    // ---------------------------------------------------------------------
     if (msg.type === 'getCaptures') {
       const currentKey = getDashboardKey();
 
-      // 現在の DOM 上のウィジェット並び順を index 化しておく。
-      // popup のカード表示順をダッシュボード上の見た目順 (左上→右下) に一致させる
-      // ため、queryId → widgetId → DOM index で並び替える。
+      // popup のカード順をダッシュボードの見た目順 (左上→右下) に合わせるため、
+      // queryId → widgetId → DOM index を用意して並び替える。
       const domOrder = new Map();
       const widgetEls = document.querySelectorAll(INSIGHTS_WIDGET_SELECTOR);
       for (let i = 0; i < widgetEls.length; i++) {
@@ -679,13 +543,11 @@
         if (!c.dashboardKey) return true;
         return c.dashboardKey === currentKey;
       }).map(function (c) {
-        // レイアウト API から取得済の title があれば付与する。
-        // popup 側のカード表示はこれを優先利用する。
+        // レイアウト API 由来の title があれば付与 (popup のカード表示が優先利用)
         const title = c.queryId ? queryIdToTitle.get(c.queryId) : null;
         return title ? Object.assign({}, c, { title: title }) : c;
       }).sort(function (a, b) {
-        // 主キー: DOM 順。レイアウト API 未取得 or DOM に該当無しは末尾固め。
-        // 副キー: タイムスタンプ降順 (DOM index 同値時の安定化)。
+        // 主キー: DOM 順 (該当無しは末尾)。副キー: タイムスタンプ降順 (同 index の安定化)。
         const aWid = a.queryId ? queryIdToWidgetId.get(a.queryId) : null;
         const bWid = b.queryId ? queryIdToWidgetId.get(b.queryId) : null;
         const aIdx = (aWid != null && domOrder.has(aWid)) ? domOrder.get(aWid) : Infinity;
@@ -697,9 +559,7 @@
       return false;
     }
 
-    // ---------------------------------------------------------------------
-    // ウィジェット情報のみ取得 (非同期応答 — findBestWidget が async)
-    // ---------------------------------------------------------------------
+    // ウィジェット情報のみ取得 (非同期 — findBestWidget が async)
     if (msg.type === 'getWidgetInfo') {
       findBestWidget(msg.columnLabels, msg.queryId).then(function (widget) {
         if (!widget) { sendResponse({ found: false, visibleLabels: [] }); return; }
@@ -711,9 +571,7 @@
       return true;
     }
 
-    // ---------------------------------------------------------------------
     // ハイライト (非同期応答)
-    // ---------------------------------------------------------------------
     if (msg.type === 'highlightWidget') {
       findBestWidget(msg.columnLabels, msg.queryId).then(function (widget) {
         if (!widget) { sendResponse({ found: false }); return; }
@@ -723,9 +581,7 @@
       return true;
     }
 
-    // ---------------------------------------------------------------------
     // ハイライト解除
-    // ---------------------------------------------------------------------
     if (msg.type === 'clearHighlight') {
       clearHighlight();
       sendResponse({ ok: true });
